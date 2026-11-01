@@ -13,8 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Descompactar o projeto
-        run: unzip -q -o '*.zip'
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,9 +22,25 @@ jobs:
         with:
           gradle-version: '8.7'
       - name: Compilar APK
-        working-directory: maazar-play/android
-        run: gradle assembleRelease --no-daemon
-      - run: cp maazar-play/android/app/build/outputs/apk/release/app-release.apk Maazar-Play.apk
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            set -e
+            unzip -q -o '*.zip'
+            yes | sdkmanager --licenses > /dev/null || true
+            sdkmanager "platforms;android-34" "build-tools;34.0.0"
+            cd maazar-play/android
+            gradle assembleRelease --no-daemon --stacktrace
+            cp app/build/outputs/apk/release/app-release.apk ../../Maazar-Play.apk
+          } 2>&1 | tee build.log
+      - name: Guardar relatorio
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p /tmp/rel && cp build.log /tmp/rel/android.log 2>/dev/null || echo "sem relatorio" > /tmp/rel/android.log
+          cd /tmp/rel && git init -q && git checkout -q -b relatorio-android && git add . && git -c user.name=robo -c user.email=robo@local commit -qm relatorio
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" relatorio-android
       - uses: actions/upload-artifact@v4
         with:
           name: android
@@ -35,22 +49,32 @@ jobs:
   windows:
     name: App Windows (notebook)
     runs-on: windows-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
-      - name: Descompactar o projeto
-        shell: pwsh
-        run: Get-ChildItem *.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath . -Force }
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Copiar o reprodutor
-        shell: pwsh
-        run: Copy-Item -Recurse -Force maazar-play/web maazar-play/desktop/web
       - name: Gerar programa
-        working-directory: maazar-play/desktop
+        shell: bash
         run: |
-          npm install
-          npm run dist
+          set -o pipefail
+          {
+            set -e
+            unzip -q -o '*.zip' || 7z x -y '*.zip' > /dev/null
+            cp -r maazar-play/web maazar-play/desktop/web
+            cd maazar-play/desktop
+            npm install
+            npm run dist
+          } 2>&1 | tee build.log
+      - name: Guardar relatorio
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel" && cp build.log "$RUNNER_TEMP/rel/windows.log" 2>/dev/null || echo "sem relatorio" > "$RUNNER_TEMP/rel/windows.log"
+          cd "$RUNNER_TEMP/rel" && git init -q && git checkout -q -b relatorio-windows && git add . && git -c user.name=robo -c user.email=robo@local commit -qm relatorio
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" relatorio-windows
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -59,6 +83,7 @@ jobs:
   publicar:
     name: Publicar para download
     needs: [android, windows]
+    if: always() && (needs.android.result == 'success' || needs.windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -73,3 +98,4 @@ jobs:
             **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV.
             **Maazar-Play-Windows.exe** — notebook ou PC com Windows (não precisa instalar, é só abrir).
           files: saida/*
+          fail_on_unmatched_files: false
