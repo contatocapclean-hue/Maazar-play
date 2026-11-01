@@ -1,0 +1,75 @@
+name: Gerar aplicativos
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: App Android (celular e TV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descompactar o projeto
+        run: unzip -q -o '*.zip'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Compilar APK
+        working-directory: maazar-play/android
+        run: gradle assembleRelease --no-daemon
+      - run: cp maazar-play/android/app/build/outputs/apk/release/app-release.apk Maazar-Play.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: Maazar-Play.apk
+
+  windows:
+    name: App Windows (notebook)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descompactar o projeto
+        shell: pwsh
+        run: Get-ChildItem *.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath . -Force }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Copiar o reprodutor
+        shell: pwsh
+        run: Copy-Item -Recurse -Force maazar-play/web maazar-play/desktop/web
+      - name: Gerar programa
+        working-directory: maazar-play/desktop
+        run: |
+          npm install
+          npm run dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: maazar-play/desktop/dist/Maazar-Play-Windows.exe
+
+  publicar:
+    name: Publicar para download
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: saida
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Maazar Play 1.0.${{ github.run_number }}
+          body: |
+            **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV.
+            **Maazar-Play-Windows.exe** — notebook ou PC com Windows (não precisa instalar, é só abrir).
+          files: saida/*
