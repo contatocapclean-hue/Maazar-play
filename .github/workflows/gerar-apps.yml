@@ -2,19 +2,30 @@ name: Gerar aplicativos
 
 on:
   push:
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+env:
+  # E-mail de contato mostrado no site (Settings > Secrets and variables > Actions > Variables)
+  CONTATO_EMAIL: ${{ vars.CONTATO_EMAIL }}
 
 jobs:
+  # ------------------------------------------------------------------ Android
   android:
-    name: App Android (celular e TV)
+    name: Android (celular, TV, Fire TV)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compilar APK
+      - name: Montar APK e AAB
         shell: bash
+        env:
+          KS_B64: ${{ secrets.MAAZAR_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.MAAZAR_KEYSTORE_PASSWORD }}
         run: |
           set -o pipefail
           {
@@ -23,31 +34,63 @@ jobs:
             export JAVA_HOME="$JAVA_HOME_17_X64"
             export PATH="$JAVA_HOME/bin:$PATH"
             export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-            java -version
             SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-            ls "$ANDROID_HOME" "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" || true
             yes | "$SDKM" --licenses > /dev/null || true
-            "$SDKM" "platforms;android-34" "build-tools;34.0.0" > /dev/null || true
-            curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+            "$SDKM" "platforms;android-36" "build-tools;35.0.0" > /dev/null || true
+            curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip
             unzip -q -o gradle.zip -d "$RUNNER_TEMP"
             cd maazar-play/android
-            "$RUNNER_TEMP/gradle-8.7/bin/gradle" assembleRelease --no-daemon --stacktrace
+            "$RUNNER_TEMP/gradle-8.13/bin/gradle" assembleRelease bundleRelease --no-daemon --stacktrace
             cp app/build/outputs/apk/release/app-release.apk ../../Maazar-Play.apk
+            cp app/build/outputs/bundle/release/app-release.aab ../../Maazar-Play-GooglePlay.aab
+            cd ../..
+            set +x
+            bash maazar-play/ci/assinar-aab.sh Maazar-Play-GooglePlay.aab
           } 2>&1 | tee build.log
-      - name: Guardar relatorio
+      - name: Guardar relatório
         if: always()
         shell: bash
-        run: |
-          mkdir -p /tmp/rel && cp build.log /tmp/rel/android.log 2>/dev/null || echo "sem relatorio" > /tmp/rel/android.log
-          cd /tmp/rel && git init -q && git checkout -q -b relatorio-android && git add . && git -c user.name=robo -c user.email=robo@local commit -qm relatorio
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" relatorio-android
+        run: bash maazar-play/ci/relatorio.sh android build.log "${{ github.token }}" || true
       - uses: actions/upload-artifact@v4
         with:
           name: android
-          path: Maazar-Play.apk
+          path: |
+            Maazar-Play.apk
+            Maazar-Play-GooglePlay.aab
 
+  # ------------------------------------------------------------------ Teste no emulador Android
+  teste-android:
+    name: Teste no emulador Android
+    needs: android
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q -o '*.zip'
+      - uses: actions/download-artifact@v4
+        with:
+          name: android
+      - name: Ativar aceleração (KVM)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Abrir o app no emulador e fotografar a tela
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash maazar-play/ci/teste-emulador.sh
+      - name: Guardar fotos do teste
+        if: always()
+        shell: bash
+        run: bash maazar-play/ci/relatorio.sh teste teste "${{ github.token }}" || true
+
+  # ------------------------------------------------------------------ Computador
   windows:
-    name: App Windows (notebook)
+    name: Windows
     runs-on: windows-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -56,7 +99,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Gerar programa
+      - name: Montar programa
         shell: bash
         run: |
           set -o pipefail
@@ -68,21 +111,147 @@ jobs:
             npm install
             npm run dist
           } 2>&1 | tee build.log
-      - name: Guardar relatorio
+      - name: Guardar relatório
         if: always()
         shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/rel" && cp build.log "$RUNNER_TEMP/rel/windows.log" 2>/dev/null || echo "sem relatorio" > "$RUNNER_TEMP/rel/windows.log"
-          cd "$RUNNER_TEMP/rel" && git init -q && git checkout -q -b relatorio-windows && git add . && git -c user.name=robo -c user.email=robo@local commit -qm relatorio
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" relatorio-windows
+        run: bash maazar-play/ci/relatorio.sh windows build.log "${{ github.token }}" || true
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: maazar-play/desktop/dist/Maazar-Play-Windows.exe
 
+  mac:
+    name: Mac
+    runs-on: macos-latest
+    continue-on-error: true
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Montar programa
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            set -e
+            unzip -q -o '*.zip'
+            cp -r maazar-play/web maazar-play/desktop/web
+            cd maazar-play/desktop
+            npm install
+            npm run dist:mac
+          } 2>&1 | tee build.log
+      - name: Guardar relatório
+        if: always()
+        shell: bash
+        run: bash maazar-play/ci/relatorio.sh mac build.log "${{ github.token }}" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: maazar-play/desktop/dist/Maazar-Play-Mac.dmg
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Montar programa
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            set -e
+            unzip -q -o '*.zip'
+            cp -r maazar-play/web maazar-play/desktop/web
+            cd maazar-play/desktop
+            npm install
+            npm run dist:linux
+          } 2>&1 | tee build.log
+      - name: Guardar relatório
+        if: always()
+        shell: bash
+        run: bash maazar-play/ci/relatorio.sh linux build.log "${{ github.token }}" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: maazar-play/desktop/dist/Maazar-Play-Linux.AppImage
+
+  # ------------------------------------------------------------------ TVs LG e Samsung
+  tvs:
+    name: TVs LG e Samsung
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Montar pacotes
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            set -ex
+            unzip -q -o '*.zip'
+            VER="1.1.${GITHUB_RUN_NUMBER}"
+            # LG (webOS): pacote .ipk
+            mkdir -p lg/app lg/out
+            cp -r maazar-play/web/. lg/app/
+            cp maazar-play/tv-lg/* lg/app/
+            node -e "const f='lg/app/appinfo.json';const j=require('./'+f);j.version='$VER';require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
+            npm install --no-save --prefix lg @webos-tools/cli@3.2.6
+            lg/node_modules/.bin/ares-package lg/app -o lg/out --no-minify
+            cp lg/out/*.ipk Maazar-Play-LG.ipk
+            # Samsung (Tizen): projeto pronto para assinar no Tizen Studio
+            mkdir -p samsung/MaazarPlay
+            cp -r maazar-play/web/. samsung/MaazarPlay/
+            cp maazar-play/tv-samsung/config.xml maazar-play/tv-samsung/icon.png samsung/MaazarPlay/
+            cp maazar-play/tv-samsung/LEIA-ME-SAMSUNG.txt samsung/
+            sed -i "s/version=\"1.1.0\"/version=\"$VER\"/" samsung/MaazarPlay/config.xml
+            (cd samsung && zip -qr ../Maazar-Play-Samsung-projeto.zip .)
+          } 2>&1 | tee build.log
+      - name: Guardar relatório
+        if: always()
+        shell: bash
+        run: bash maazar-play/ci/relatorio.sh tvs build.log "${{ github.token }}" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tvs
+          path: |
+            Maazar-Play-LG.ipk
+            Maazar-Play-Samsung-projeto.zip
+
+  # ------------------------------------------------------------------ Site (GitHub Pages): download, privacidade e termos
+  site:
+    name: Publicar o site do app
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preparar site
+        shell: bash
+        run: |
+          unzip -q -o '*.zip'
+          bash maazar-play/ci/preparar-site.sh
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: maazar-play/site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  # ------------------------------------------------------------------ Publicação
   publicar:
     name: Publicar para download
-    needs: [android, windows]
+    needs: [android, windows, mac, linux, tvs]
     if: always() && (needs.android.result == 'success' || needs.windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
@@ -92,10 +261,15 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Maazar Play 1.0.${{ github.run_number }}
+          tag_name: v1.1.${{ github.run_number }}
+          name: Maazar Play 1.1.${{ github.run_number }}
           body: |
-            **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV.
-            **Maazar-Play-Windows.exe** — notebook ou PC com Windows (não precisa instalar, é só abrir).
+            **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV (instalação direta).
+            **Maazar-Play-GooglePlay.aab** — arquivo para enviar à Google Play.
+            **Maazar-Play-Windows.exe** — Windows (é só abrir).
+            **Maazar-Play-Mac.dmg** — Mac (na primeira vez: botão direito > Abrir).
+            **Maazar-Play-Linux.AppImage** — Linux.
+            **Maazar-Play-LG.ipk** — TVs LG (webOS), para enviar ao LG Seller Lounge.
+            **Maazar-Play-Samsung-projeto.zip** — TVs Samsung (Tizen), para assinar no Tizen Studio.
           files: saida/*
           fail_on_unmatched_files: false
