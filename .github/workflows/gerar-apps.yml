@@ -40,9 +40,12 @@ jobs:
             curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip
             unzip -q -o gradle.zip -d "$RUNNER_TEMP"
             cd maazar-play/android
-            "$RUNNER_TEMP/gradle-8.13/bin/gradle" assembleRelease bundleRelease --no-daemon --stacktrace
-            cp app/build/outputs/apk/release/app-release.apk ../../Maazar-Play.apk
-            cp app/build/outputs/bundle/release/app-release.aab ../../Maazar-Play-GooglePlay.aab
+            "$RUNNER_TEMP/gradle-8.13/bin/gradle" assembleDiretoRelease assembleLojaRelease bundleLojaRelease --no-daemon --stacktrace
+            # instalação direta (Downloader, TV Box): com aviso de atualização
+            cp app/build/outputs/apk/direto/release/app-direto-release.apk ../../Maazar-Play.apk
+            # lojas (Amazon Appstore): sem atualização própria
+            cp app/build/outputs/apk/loja/release/app-loja-release.apk ../../Maazar-Play-Lojas.apk
+            cp app/build/outputs/bundle/lojaRelease/app-loja-release.aab ../../Maazar-Play-GooglePlay.aab
             cd ../..
             set +x
             bash maazar-play/ci/assinar-aab.sh Maazar-Play-GooglePlay.aab
@@ -56,6 +59,7 @@ jobs:
           name: android
           path: |
             Maazar-Play.apk
+            Maazar-Play-Lojas.apk
             Maazar-Play-GooglePlay.aab
 
   # ------------------------------------------------------------------ Teste no emulador Android
@@ -198,7 +202,7 @@ jobs:
           {
             set -ex
             unzip -q -o '*.zip'
-            VER="1.1.${GITHUB_RUN_NUMBER}"
+            VER="$(tr -d '\r\n ' < maazar-play/VERSAO).${GITHUB_RUN_NUMBER}"
             # LG (webOS): pacote .ipk
             mkdir -p lg/app lg/out
             cp -r maazar-play/web/. lg/app/
@@ -255,16 +259,24 @@ jobs:
     if: always() && (needs.android.result == 'success' || needs.windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Ler a versão
+        id: versao
+        shell: bash
+        run: |
+          unzip -q -o '*.zip'
+          echo "ver=$(tr -d '\r\n ' < maazar-play/VERSAO).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           path: saida
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.${{ github.run_number }}
-          name: Maazar Play 1.1.${{ github.run_number }}
+          tag_name: v${{ steps.versao.outputs.ver }}
+          name: Maazar Play ${{ steps.versao.outputs.ver }}
           body: |
-            **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV (instalação direta).
+            **Maazar-Play.apk** — celular Android, Android TV, Google TV, TV Box e Fire TV (instalação direta, avisa quando há versão nova).
+            **Maazar-Play-Lojas.apk** — para enviar à Amazon Appstore (sem atualização própria).
             **Maazar-Play-GooglePlay.aab** — arquivo para enviar à Google Play.
             **Maazar-Play-Windows.exe** — Windows (é só abrir).
             **Maazar-Play-Mac.dmg** — Mac (na primeira vez: botão direito > Abrir).
